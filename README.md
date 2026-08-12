@@ -14,6 +14,7 @@
 - 当前日期客流计数和按小时柱状图
 - 浏览器内按顺序播放延时照片，支持 1×、3×、5×
 - AP 配网页面，可加入 2.4 GHz 局域网并通过 `esp32cam.local` 访问
+- 连接局域网后通过 NTP 自动校准北京时间，手机时间同步保留为备用
 - 日夜光线大幅变化时自动恢复曝光并重新校准运动背景
 - Windows/Python 每日视频工具：下载事件附近照片、生成字幕、旁白、背景音乐和高峰时段总结
 - 热点主题与灾害提醒分离；灾害信息只可作为结尾安全提醒
@@ -93,6 +94,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\serial-monitor.ps1 -PortN
 4. 如果系统没有自动弹出配网页面，打开 `http://192.168.4.1/network`。
 5. 选择附近的 2.4 GHz Wi-Fi，输入密码并保存。
 6. 设备会重启。让手机或电脑连接同一个局域网，然后打开 `http://esp32cam.local/`；如果 mDNS 不可用，请使用串口中打印的 LAN IP。
+
+联网成功后设备会自动访问 NTP 服务器校准北京时间。校时成功前照片暂时使用安全的序号目录；校时成功后自动切换到 `YYYYMMDDHH/HHMMSS.jpg`，无需打开手机页面。
 
 路由器 SSID 和密码保存在 ESP32 的 Preferences 中，不写入源代码或 SD 卡。公开部署前建议修改 `src/main.cpp` 中的默认 AP 名称和密码。
 

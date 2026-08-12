@@ -8,6 +8,7 @@
 #include <esp_camera.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
+#include <esp_sntp.h>
 #include <img_converters.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -82,6 +83,12 @@ constexpr uint16_t kExposureUnderexposedRatioThreshold = 8000;  // 80 percent.
 constexpr uint8_t kExposureAbnormalFramesToRecover = 8;
 constexpr uint8_t kExposureAutoSettleFrames = 16;
 constexpr uint32_t kExposureRecoveryCooldownMs = 2UL * 60UL * 1000UL;
+constexpr char kNtpServerPrimary[] = "ntp.aliyun.com";
+constexpr char kNtpServerSecondary[] = "ntp1.aliyun.com";
+constexpr char kNtpServerFallback[] = "pool.ntp.org";
+constexpr char kChinaTimezone[] = "CST-8";
+constexpr uint32_t kInitialNtpWaitMs = 12000;
+constexpr uint32_t kNtpRetryIntervalMs = 15UL * 60UL * 1000UL;
 
 // AI Thinker ESP32-CAM camera pins.
 constexpr int kPinPwdn = 32;
@@ -141,6 +148,10 @@ volatile bool exposureAdjusting = false;
 volatile uint8_t cameraBrightness = 0;
 volatile uint16_t cameraBrightRatio = 0;
 volatile uint16_t cameraDarkRatio = 0;
+volatile bool ntpSyncReceived = false;
+bool ntpConfigured = false;
+bool ntpSyncAnnounced = false;
+uint32_t lastNtpConfigureAt = 0;
 uint32_t wifiRestartRequestedAt = 0;
 
 struct MotionFrame {
@@ -154,6 +165,8 @@ struct __attribute__((packed)) PhotoCatalogRecord {
 };
 
 static_assert(sizeof(PhotoCatalogRecord) == 12, "photo catalog record size changed");
+
+bool clockIsValid();
 
 extern const uint8_t chartJsStart[] asm("_binary_web_chart_umd_min_js_start");
 extern const uint8_t chartJsEnd[] asm("_binary_web_chart_umd_min_js_end");
@@ -292,7 +305,7 @@ const char kNetworkHtml[] PROGMEM = R"HTML(
 <input id="customSsid" class="hidden" maxlength="32" autocomplete="off" placeholder="输入隐藏 Wi-Fi 名称">
 <label for="password">Wi-Fi 密码</label><input id="password" type="password" maxlength="63" autocomplete="off" placeholder="请输入密码">
 <button id="save" type="button">保存并连接</button><div class="status" id="status">正在读取网络状态...</div><p><a href="/">返回监控页面</a></p></main><div class="restart hidden" id="restart"><div class="restart-panel"><div class="spinner"></div><h2>设备正在重启</h2><p id="restartText">正在保存 Wi-Fi 设置...</p><p>网页和热点暂时断开属于正常现象，请不要关闭 ESP32 电源。</p></div></div>
-<script>const statusEl=document.getElementById('status'),ssidEl=document.getElementById('ssid'),customEl=document.getElementById('customSsid'),restartEl=document.getElementById('restart'),restartText=document.getElementById('restartText');let configuredSsid='';function updateCustom(){customEl.classList.toggle('hidden',ssidEl.value!=='__manual__');}function showRestart(ssid){restartEl.classList.remove('hidden');document.querySelectorAll('button,input,select').forEach(item=>item.disabled=true);let seconds=15;restartText.innerHTML='正在连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong><br>预计还需 '+seconds+' 秒';const timer=setInterval(()=>{seconds--;if(seconds>0)restartText.innerHTML='正在连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong><br>预计还需 '+seconds+' 秒';else{clearInterval(timer);restartText.innerHTML='重启已完成。请让手机连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong>，再访问 esp32cam.local';}},1000);}async function scan(){statusEl.textContent='正在扫描附近 Wi-Fi...';try{const r=await fetch('/api/network/scan?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error();const data=await r.json();ssidEl.innerHTML='';const seen=new Set();(data.networks||[]).forEach(n=>{if(!n.ssid||seen.has(n.ssid))return;seen.add(n.ssid);const option=document.createElement('option');option.value=n.ssid;option.textContent=n.ssid+'  ('+n.rssi+' dBm'+(n.secure?' · 有密码':' · 开放')+')';ssidEl.appendChild(option);});const manual=document.createElement('option');manual.value='__manual__';manual.textContent='其他/隐藏 Wi-Fi（手动输入）';ssidEl.appendChild(manual);if(configuredSsid&&seen.has(configuredSsid))ssidEl.value=configuredSsid;else if(configuredSsid){ssidEl.value='__manual__';customEl.value=configuredSsid;}updateCustom();statusEl.textContent='扫描到 '+seen.size+' 个 Wi-Fi，请选择后输入密码。';}catch(e){statusEl.textContent='扫描失败，请确认手机仍连接 ESP32-CAM-DAY1；也可以选择手动输入。';ssidEl.innerHTML='<option value="__manual__">其他/隐藏 Wi-Fi（手动输入）</option>';ssidEl.value='__manual__';updateCustom();}}ssidEl.onchange=updateCustom;document.getElementById('scan').onclick=scan;document.getElementById('save').onclick=async()=>{const ssid=(ssidEl.value==='__manual__'?customEl.value:ssidEl.value).trim(),password=document.getElementById('password').value;if(!ssid){statusEl.textContent='请先选择或输入 Wi-Fi 名称';return;}showRestart(ssid);const body='ssid='+encodeURIComponent(ssid)+'&password='+encodeURIComponent(password);try{await fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});}catch(e){}};async function load(){try{const r=await fetch('/api/network',{cache:'no-store'}),s=await r.json();configuredSsid=s.configuredSsid||'';statusEl.textContent='当前状态：'+(s.connected?'已连接':'未连接')+'\nSSID：'+(s.ssid||'--')+'\nLAN IP：'+(s.ip||'--');}catch(e){statusEl.textContent='正在读取网络状态...';}scan();}load();</script></body></html>
+<script>const statusEl=document.getElementById('status'),ssidEl=document.getElementById('ssid'),customEl=document.getElementById('customSsid'),restartEl=document.getElementById('restart'),restartText=document.getElementById('restartText');let configuredSsid='';function updateCustom(){customEl.classList.toggle('hidden',ssidEl.value!=='__manual__');}function showRestart(ssid){restartEl.classList.remove('hidden');document.querySelectorAll('button,input,select').forEach(item=>item.disabled=true);let seconds=15;restartText.innerHTML='正在连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong><br>预计还需 '+seconds+' 秒';const timer=setInterval(()=>{seconds--;if(seconds>0)restartText.innerHTML='正在连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong><br>预计还需 '+seconds+' 秒';else{clearInterval(timer);restartText.innerHTML='重启已完成。请让手机连接 <strong>'+ssid.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</strong>，再访问 esp32cam.local';}},1000);}async function scan(){statusEl.textContent='正在扫描附近 Wi-Fi...';try{const r=await fetch('/api/network/scan?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error();const data=await r.json();ssidEl.innerHTML='';const seen=new Set();(data.networks||[]).forEach(n=>{if(!n.ssid||seen.has(n.ssid))return;seen.add(n.ssid);const option=document.createElement('option');option.value=n.ssid;option.textContent=n.ssid+'  ('+n.rssi+' dBm'+(n.secure?' · 有密码':' · 开放')+')';ssidEl.appendChild(option);});const manual=document.createElement('option');manual.value='__manual__';manual.textContent='其他/隐藏 Wi-Fi（手动输入）';ssidEl.appendChild(manual);if(configuredSsid&&seen.has(configuredSsid))ssidEl.value=configuredSsid;else if(configuredSsid){ssidEl.value='__manual__';customEl.value=configuredSsid;}updateCustom();statusEl.textContent='扫描到 '+seen.size+' 个 Wi-Fi，请选择后输入密码。';}catch(e){statusEl.textContent='扫描失败，请确认手机仍连接 ESP32-CAM-DAY1；也可以选择手动输入。';ssidEl.innerHTML='<option value="__manual__">其他/隐藏 Wi-Fi（手动输入）</option>';ssidEl.value='__manual__';updateCustom();}}ssidEl.onchange=updateCustom;document.getElementById('scan').onclick=scan;document.getElementById('save').onclick=async()=>{const ssid=(ssidEl.value==='__manual__'?customEl.value:ssidEl.value).trim(),password=document.getElementById('password').value;if(!ssid){statusEl.textContent='请先选择或输入 Wi-Fi 名称';return;}showRestart(ssid);const body='ssid='+encodeURIComponent(ssid)+'&password='+encodeURIComponent(password);try{await fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});}catch(e){}};async function load(){try{const r=await fetch('/api/network',{cache:'no-store'}),s=await r.json();configuredSsid=s.configuredSsid||'';statusEl.textContent='当前状态：'+(s.connected?'已连接':'未连接')+'\nSSID：'+(s.ssid||'--')+'\nLAN IP：'+(s.ip||'--')+'\n网络时间：'+(s.ntpSync?'已自动校准':(s.connected?'正在校准':'等待联网'));}catch(e){statusEl.textContent='正在读取网络状态...';}scan();}load();</script></body></html>
 )HTML";
 
 bool initializeCamera() {
@@ -1860,11 +1873,13 @@ esp_err_t networkStatusHandler(httpd_req_t *request) {
   preferences.end();
   const String connectedSsid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   const String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-  char json[256];
+  char json[320];
   std::snprintf(json, sizeof(json),
-                "{\"connected\":%s,\"configuredSsid\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"hostname\":\"esp32cam.local\"}",
+                "{\"connected\":%s,\"configuredSsid\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"hostname\":\"esp32cam.local\",\"timeValid\":%s,\"ntpSync\":%s}",
                 WiFi.status() == WL_CONNECTED ? "true" : "false",
-                configuredSsid.c_str(), connectedSsid.c_str(), ip.c_str());
+                configuredSsid.c_str(), connectedSsid.c_str(), ip.c_str(),
+                clockIsValid() ? "true" : "false",
+                ntpSyncReceived ? "true" : "false");
   httpd_resp_set_type(request, "application/json");
   httpd_resp_set_hdr(request, "Cache-Control", "no-store");
   return httpd_resp_send(request, json, HTTPD_RESP_USE_STRLEN);
@@ -1934,10 +1949,55 @@ void connectStoredWiFi() {
   }
 }
 
+bool clockIsValid() { return time(nullptr) >= 1700000000; }
+
+void onNtpTimeSynchronized(struct timeval *) { ntpSyncReceived = true; }
+
+void configureNetworkTime() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  sntp_set_time_sync_notification_cb(onNtpTimeSynchronized);
+  configTzTime(kChinaTimezone, kNtpServerPrimary, kNtpServerSecondary,
+               kNtpServerFallback);
+  ntpConfigured = true;
+  ntpSyncAnnounced = false;
+  lastNtpConfigureAt = millis();
+  Serial.printf("[TIME] NTP configured: %s, %s, %s\n", kNtpServerPrimary,
+                kNtpServerSecondary, kNtpServerFallback);
+}
+
+bool waitForInitialNetworkTime(uint32_t timeoutMs) {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  if (!ntpConfigured) {
+    configureNetworkTime();
+  }
+  const uint32_t deadline = millis() + timeoutMs;
+  while (!ntpSyncReceived && static_cast<int32_t>(deadline - millis()) > 0) {
+    delay(100);
+  }
+  if (!ntpSyncReceived || !clockIsValid()) {
+    Serial.println(
+        "[TIME] NTP not ready yet; sequence folders and browser fallback remain available");
+    return false;
+  }
+  struct tm localTime {};
+  const time_t now = time(nullptr);
+  localtime_r(&now, &localTime);
+  char timestamp[32];
+  std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S",
+                &localTime);
+  Serial.printf("[TIME] NTP synchronized: %s CST\n", timestamp);
+  ntpSyncAnnounced = true;
+  return true;
+}
+
 esp_err_t statusHandler(httpd_req_t *request) {
-  char json[448];
+  char json[512];
   std::snprintf(json, sizeof(json),
-                "{\"sd\":%s,\"saved\":%lu,\"failures\":%lu,\"lastBytes\":%lu,\"lastWriteMs\":%lu,\"freeMB\":%lu,\"nextImage\":%lu,\"count\":%lu,\"armed\":%s,\"approach\":%s,\"near\":%s,\"motion\":%s,\"motionScore\":%u.%02u,\"exposureAdjusting\":%s,\"brightness\":%u,\"brightRatio\":%u.%02u,\"darkRatio\":%u.%02u}",
+                "{\"sd\":%s,\"saved\":%lu,\"failures\":%lu,\"lastBytes\":%lu,\"lastWriteMs\":%lu,\"freeMB\":%lu,\"nextImage\":%lu,\"count\":%lu,\"armed\":%s,\"approach\":%s,\"near\":%s,\"motion\":%s,\"motionScore\":%u.%02u,\"exposureAdjusting\":%s,\"brightness\":%u,\"brightRatio\":%u.%02u,\"darkRatio\":%u.%02u,\"timeValid\":%s,\"ntpSync\":%s}",
                 sdReady ? "true" : "false",
                 static_cast<unsigned long>(savedThisBoot),
                 static_cast<unsigned long>(captureFailures),
@@ -1953,7 +2013,8 @@ esp_err_t statusHandler(httpd_req_t *request) {
                 motionScore % 100, exposureAdjusting ? "true" : "false",
                 cameraBrightness, cameraBrightRatio / 100,
                 cameraBrightRatio % 100, cameraDarkRatio / 100,
-                cameraDarkRatio % 100);
+                cameraDarkRatio % 100, clockIsValid() ? "true" : "false",
+                ntpSyncReceived ? "true" : "false");
   httpd_resp_set_type(request, "application/json");
   httpd_resp_set_hdr(request, "Cache-Control", "no-store");
   return httpd_resp_send(request, json, HTTPD_RESP_USE_STRLEN);
@@ -2415,7 +2476,7 @@ void setup() {
   delay(500);
   Serial.println("\n[BOOT] ESP32-CAM customer-flow and timelapse gateway");
 
-  setenv("TZ", "CST-8", 1);
+  setenv("TZ", kChinaTimezone, 1);
   tzset();
 
   cameraMutex = xSemaphoreCreateMutex();
@@ -2459,6 +2520,11 @@ void setup() {
 
   connectStoredWiFi();
 
+  if (WiFi.status() == WL_CONNECTED) {
+    configureNetworkTime();
+    waitForInitialNetworkTime(kInitialNtpWaitMs);
+  }
+
   initializeSdCard();
 
   if (sdReady) {
@@ -2474,6 +2540,24 @@ void loop() {
     Serial.println("[WIFI] restarting to apply router credentials");
     Serial.flush();
     ESP.restart();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!ntpConfigured ||
+        (!ntpSyncReceived &&
+         millis() - lastNtpConfigureAt >= kNtpRetryIntervalMs)) {
+      configureNetworkTime();
+    }
+    if (ntpSyncReceived && clockIsValid() && !ntpSyncAnnounced) {
+      struct tm localTime {};
+      const time_t now = time(nullptr);
+      localtime_r(&now, &localTime);
+      char timestamp[32];
+      std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S",
+                    &localTime);
+      Serial.printf("[TIME] NTP synchronized: %s CST\n", timestamp);
+      ntpSyncAnnounced = true;
+      maintainDailyCustomerCount();
+    }
   }
   maintainDailyCustomerCount();
   delay(1000);
