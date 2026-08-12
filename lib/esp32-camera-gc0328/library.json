@@ -1,0 +1,35 @@
+{
+  "name": "esp32-camera-gc0328",
+  "version": "2.0.0",
+  "keywords": "esp32, camera, espressif, esp32-cam",
+  "description": "Vendored ESP32 camera driver with project-specific GC0328 support.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/espressif/esp32-camera"
+  },
+  "frameworks": ["arduino", "espidf"],
+  "platforms": "*",
+  "build": {
+    "flags": [
+      "-Idriver/include",
+      "-Iconversions/include",
+      "-Idriver/private_include",
+      "-Iconversions/private_include",
+      "-Isensors/private_include",
+      "-Itarget/private_include",
+      "-fno-rtti"
+    ],
+    "includeDir": "driver/include",
+    "srcDir": ".",
+    "srcFilter": [
+      "-<*>",
+      "+<driver>",
+      "-<driver/sccb-ng.c>",
+      "+<conversions>",
+      "+<sensors/gc0328.c>",
+      "+<sensors/ov2640.c>",
+      "+<target/xclk.c>",
+      "+<target/esp32/ll_cam.c>"
+    ]
+  }
+}

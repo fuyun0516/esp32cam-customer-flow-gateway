@@ -1,0 +1,36 @@
+# PlatformIO / editor state
+.pio/
+.tools/
+.vscode/
+.idea/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime data and generated media
+media/
+output/
+tmp/
+*.log
+*.part
+*.concat.txt
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.local.*
+secrets.*
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
