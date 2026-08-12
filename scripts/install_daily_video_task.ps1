@@ -3,7 +3,8 @@ param(
     [string]$RunAt = '00:20',
     [string]$StoreName = '',
     [string]$StoreRegion = '',
-    [string]$PythonExe = 'python'
+    [string]$PythonExe = 'python',
+    [ValidateRange(1, 30)][int]$LookbackDays = 7
 )
 
 $taskName = 'ESP32-CAM Daily Store Video'
@@ -16,7 +17,7 @@ if ([System.IO.Path]::IsPathRooted($PythonExe)) {
     throw "Python command not found: $PythonExe"
 }
 $time = [DateTime]::ParseExact($RunAt, 'HH:mm', $null)
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -Device `"$Device`" -PythonExe `"$PythonExe`""
+$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -Device `"$Device`" -PythonExe `"$PythonExe`" -LookbackDays $LookbackDays"
 if (-not [string]::IsNullOrWhiteSpace($StoreName)) {
     if ($StoreName.Contains('"')) {
         throw 'StoreName cannot contain a double quote.'
@@ -31,7 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($StoreRegion)) {
 }
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -Daily -At $time
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 6 -RestartInterval (New-TimeSpan -Minutes 15) -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 96 -RestartInterval (New-TimeSpan -Minutes 15) -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Download ESP32-CAM event photos and create the previous day promotional video.' -Force
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Create pending ESP32-CAM daily videos automatically; retry until the store LAN becomes available.' -Force
 Get-ScheduledTask -TaskName $taskName

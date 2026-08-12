@@ -186,10 +186,11 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\install_daily_video_task.
   -RunAt 00:20 `
   -StoreName "示例门店" `
   -StoreRegion "示例省示例市" `
-  -PythonExe python
+  -PythonExe python `
+  -LookbackDays 7
 ```
 
-电脑必须在计划时间开机且未休眠，并能访问 ESP32-CAM。任务日志写入 `output/task-logs/`。
+任务会检查最近 7 个已结束日期并跳过已经完成的视频。如果电脑在 00:20 关机、休眠或不在门店局域网，Windows 会在恢复后启动任务，并每 15 分钟重试，最长约 24 小时；电脑之后带到门店并连接同一 Wi-Fi 时即可自动补做。任务日志写入 `output/task-logs/`。
 
 ## 算法限制与隐私
 
