@@ -46,18 +46,14 @@ constexpr uint32_t kApproachSampleIntervalMs = 200;
 constexpr uint32_t kCameraMotionSampleIntervalMs = 1000;
 constexpr uint32_t kCameraArmedMotionSampleIntervalMs = 500;
 constexpr uint32_t kCameraApproachSampleIntervalMs = 200;
-constexpr uint32_t kApproachTrackingTimeoutMs = 20000;
+constexpr uint32_t kEntryTrackingTimeoutMs = 12000;
 constexpr uint32_t kMotionCooldownMs = 5000;
 constexpr uint8_t kMotionWarmupSamples = 6;
 constexpr uint8_t kStableFramesToRearm = 4;
 constexpr uint8_t kStableMotionFramesToRebase = 4;
-constexpr uint8_t kApproachMissingFramesToConfirmExit = 2;
-constexpr uint8_t kApproachMinActiveFrames = 3;
-constexpr uint8_t kApproachPartialExitFrames = 2;
-constexpr uint8_t kApproachRemainingPercent = 92;
-constexpr uint16_t kApproachPartialExitDrop = 800;  // 8 percentage points.
-constexpr uint16_t kApproachRemainingTargetMin = 1500;  // 15 percent.
-constexpr uint32_t kApproachExitCooldownMs = 500;
+constexpr uint8_t kEntryMissingFramesToConfirmExit = 2;
+constexpr uint8_t kEntryMinActiveFrames = 3;
+constexpr uint32_t kEntryExitCooldownMs = 800;
 constexpr uint16_t kMotionWidth = 80;
 constexpr uint16_t kMotionHeight = 60;
 constexpr uint16_t kRoiLeft = 0;
@@ -69,10 +65,13 @@ constexpr uint16_t kMotionRatioThreshold = 100;  // 1.00 percent.
 constexpr uint16_t kSceneStableRatioThreshold = 100;  // 1.00 percent.
 constexpr uint16_t kGlobalChangeThreshold = 10000;  // Keep full-frame human motion.
 constexpr size_t kRoiPixels = kRoiWidth * kRoiHeight;
-constexpr uint16_t kInvalidMotionCenterX = UINT16_MAX;
-constexpr uint16_t kApproachFarScoreMax = 3500;  // 35 percent.
-constexpr uint16_t kApproachNearScoreMin = 4500;  // 45 percent.
-constexpr uint16_t kApproachRequiredGrowth = 1000;  // 10 percentage points.
+constexpr uint16_t kInvalidMotionCenterY = UINT16_MAX;
+// The overhead entry detector assumes image top = outside and bottom = inside.
+// Coordinates are relative to the 46-row motion ROI.
+constexpr uint16_t kEntryUpperZoneMaxY = 21;
+constexpr uint16_t kEntryLowerZoneMinY = 25;
+constexpr uint16_t kEntryBottomExitMinY = 29;
+constexpr uint16_t kEntryRequiredTravelY = 12;
 constexpr uint32_t kPhotoRecoveryOldestHint = 2251;
 constexpr uint8_t kExposureBrightPixelThreshold = 240;
 constexpr uint8_t kExposureDarkPixelThreshold = 10;
@@ -275,7 +274,7 @@ const char kIndexHtml[] PROGMEM = R"HTML(
     el('playButton').onclick=()=>playing?pausePlayback():playPlayback();el('previousFrame').onclick=()=>{pausePlayback();showFrame(Math.max(playStart,currentFrame-1),false)};el('nextFrame').onclick=()=>{pausePlayback();showFrame(Math.min(playEnd,currentFrame+1),false)};el('timeline').oninput=e=>{pausePlayback();showFrame(Number(e.target.value),false)};el('rangeSelect').onchange=configureRange;el('refreshPhotos').onclick=loadTimelapseMeta;document.querySelectorAll('.speed-button').forEach(button=>button.onclick=()=>{playbackSpeed=Number(button.dataset.speed);document.querySelectorAll('.speed-button').forEach(item=>item.classList.toggle('active',item===button));el('playbackBadge').textContent=(basePlaybackFps*playbackSpeed)+' FPS · '+playbackSpeed+'×'});
     async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error();const s=await r.json();setConnection(true);
       el('sd').textContent=s.sd?'就绪':'初始化中';el('sd').className='metric-value '+(s.sd?'good':'bad');el('count').textContent=s.count;
-      const score=Number(s.motionScore)||0;el('motionState').textContent=!s.armed?'\u6b63\u5728\u6821\u51c6':(s.near?'\u5df2\u5230\u8fd1\u5904\uff0c\u7b49\u5f85\u79bb\u5f00':(s.approach?'\u76ee\u6807\u6b63\u5728\u9760\u8fd1':(s.motion?'\u68c0\u6d4b\u5230\u79fb\u52a8':'\u53ef\u4ee5\u8ba1\u6570')));el('motionState').classList.toggle('active',s.armed&&s.motion);el('motionScore').textContent=s.armed?score.toFixed(2)+'%':'--%';el('motionBar').style.width=s.armed?Math.min(100,score)+'%':'0';el('motionBar').classList.toggle('active',s.armed&&s.motion);
+const score=Number(s.motionScore)||0;el('motionState').textContent=!s.armed?'\u6b63\u5728\u6821\u51c6':(s.near?'\u5df2\u7ecf\u8fc7\u4e0b\u65b9\u533a\u57df\uff0c\u7b49\u5f85\u79bb\u5f00':(s.approach?'\u76ee\u6807\u6b63\u4ece\u4e0a\u5411\u4e0b\u901a\u8fc7':(s.motion?'\u68c0\u6d4b\u5230\u79fb\u52a8':'\u53ef\u4ee5\u8ba1\u6570')));el('motionState').classList.toggle('active',s.armed&&s.motion);el('motionScore').textContent=s.armed?score.toFixed(2)+'%':'--%';el('motionBar').style.width=s.armed?Math.min(100,score)+'%':'0';el('motionBar').classList.toggle('active',s.armed&&s.motion);
       el('saved').textContent=s.saved+' 张';el('bytes').textContent=formatBytes(s.lastBytes);el('writeMs').textContent=s.lastWriteMs+' ms';el('freeSpace').textContent=formatSpace(s.freeMB);el('latestImage').textContent=s.nextImage>1?'IMG_'+String(s.nextImage-1).padStart(6,'0'): '--';
       el('updatedAt').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});el('failureState').textContent=s.failures?('写入异常 '+s.failures+' 次'):'运行正常';if(lastDeviceCount!==s.count){lastDeviceCount=s.count;if(currentView==='trendView')loadFlowData()}
     }catch(e){setConnection(false);el('updatedAt').textContent='状态更新失败'}}
@@ -1206,12 +1205,12 @@ uint8_t rgb565ToGray(uint16_t pixel) {
 
 bool analyzeMotion(const uint8_t *jpeg, size_t jpegLength, bool *detected,
                    uint16_t *score, uint16_t *frameScore,
-                   uint16_t *motionCenterX, uint8_t *averageBrightness,
+                   uint16_t *motionCenterY, uint8_t *averageBrightness,
                    uint16_t *brightRatio, uint16_t *darkRatio) {
   *detected = false;
   *score = 0;
   *frameScore = 0;
-  *motionCenterX = kInvalidMotionCenterX;
+  *motionCenterY = kInvalidMotionCenterY;
   *averageBrightness = 0;
   *brightRatio = 0;
   *darkRatio = 0;
@@ -1259,19 +1258,19 @@ bool analyzeMotion(const uint8_t *jpeg, size_t jpegLength, bool *detected,
 
   const int32_t averageBrightnessDelta = brightnessDeltaSum / kRoiPixels;
   size_t changedPixels = 0;
-  size_t changedXSum = 0;
+  size_t changedYSum = 0;
   for (size_t i = 0; i < kRoiPixels; ++i) {
     const int32_t pixelDelta = static_cast<int32_t>(currentRoi[i]) -
                                static_cast<int32_t>(backgroundRoi[i]) -
                                averageBrightnessDelta;
     if (std::abs(pixelDelta) >= kPixelDeltaThreshold) {
       ++changedPixels;
-      changedXSum += i % kRoiWidth;
+      changedYSum += i / kRoiWidth;
     }
   }
   *score = static_cast<uint16_t>((changedPixels * 10000UL) / kRoiPixels);
   if (changedPixels != 0) {
-    *motionCenterX = static_cast<uint16_t>(changedXSum / changedPixels);
+    *motionCenterY = static_cast<uint16_t>(changedYSum / changedPixels);
   }
   *detected = *score >= kMotionRatioThreshold &&
               *score <= kGlobalChangeThreshold;
@@ -1312,18 +1311,15 @@ void motionTask(void *) {
   bool pendingFlowEvent = false;
   bool detectorCalibrated = false;
   bool approachCandidate = false;
-  bool farTargetSeen = false;
   bool nearTargetSeen = false;
   uint8_t runtimeGlobalFrames = 0;
   uint8_t stationaryMotionFrames = 0;
   uint8_t stableFrames = 0;
   uint8_t approachMissingFrames = 0;
   uint8_t approachActiveFrames = 0;
-  uint8_t partialExitFrames = 0;
-  uint16_t approachStartScore = 0;
-  uint16_t approachMinScore = 0;
-  uint16_t approachMaxScore = 0;
-  uint16_t exitReferenceScore = 0;
+  uint16_t entryStartY = kInvalidMotionCenterY;
+  uint16_t entryMaxY = 0;
+  uint16_t lastMotionCenterY = kInvalidMotionCenterY;
   uint32_t approachStartedAt = 0;
   uint32_t lastCountAt = 0;
   uint8_t diagnosticDivider = 0;
@@ -1341,16 +1337,13 @@ void motionTask(void *) {
   auto resetApproachTracking = [&]() {
     approachCandidate = false;
     approachTrackingActive = false;
-    farTargetSeen = false;
     nearTargetSeen = false;
     approachNearConfirmed = false;
     approachMissingFrames = 0;
     approachActiveFrames = 0;
-    partialExitFrames = 0;
-    approachStartScore = 0;
-    approachMinScore = 0;
-    approachMaxScore = 0;
-    exitReferenceScore = 0;
+    entryStartY = kInvalidMotionCenterY;
+    entryMaxY = 0;
+    lastMotionCenterY = kInvalidMotionCenterY;
     approachStartedAt = 0;
   };
 
@@ -1409,13 +1402,13 @@ void motionTask(void *) {
     bool detected = false;
     uint16_t score = 0;
     uint16_t frameScore = 0;
-    uint16_t motionCenterX = kInvalidMotionCenterX;
+    uint16_t motionCenterY = kInvalidMotionCenterY;
     uint8_t averageBrightness = 0;
     uint16_t brightRatio = 0;
     uint16_t darkRatio = 0;
     const bool analyzed =
         analyzeMotion(jpeg, jpegLength, &detected, &score, &frameScore,
-                      &motionCenterX, &averageBrightness, &brightRatio,
+                      &motionCenterY, &averageBrightness, &brightRatio,
                       &darkRatio);
     free(jpeg);
     if (!analyzed) {
@@ -1537,7 +1530,7 @@ void motionTask(void *) {
     if (globalChange) {
       motionDetected = false;
       if (approachCandidate) {
-        Serial.println("[APPROACH] tracking cancelled: global scene change");
+        Serial.println("[ENTRY] tracking cancelled: global scene change");
         resetApproachTracking();
       }
       if (++runtimeGlobalFrames >= 3) {
@@ -1594,12 +1587,11 @@ void motionTask(void *) {
 
     const uint32_t now = millis();
     if (approachCandidate &&
-        now - approachStartedAt >= kApproachTrackingTimeoutMs) {
+        now - approachStartedAt >= kEntryTrackingTimeoutMs) {
       Serial.printf(
-          "[APPROACH] tracking timed out: far=%s near=%s min=%u.%02u%% max=%u.%02u%%\n",
-          farTargetSeen ? "yes" : "no", nearTargetSeen ? "yes" : "no",
-          approachMinScore / 100, approachMinScore % 100,
-          approachMaxScore / 100, approachMaxScore % 100);
+          "[ENTRY] tracking timed out: crossed=%s startY=%u maxY=%u lastY=%u\n",
+          nearTargetSeen ? "yes" : "no", entryStartY, entryMaxY,
+          lastMotionCenterY);
       std::memcpy(backgroundRoi, currentRoi, sizeof(backgroundRoi));
       std::memcpy(previousRoi, currentRoi, sizeof(previousRoi));
       motionScore = 0;
@@ -1608,96 +1600,52 @@ void motionTask(void *) {
       continue;
     }
 
-    if (detected && motionCenterX != kInvalidMotionCenterX) {
+    if (detected && motionCenterY != kInvalidMotionCenterY) {
       stableFrames = 0;
       if (!approachCandidate) {
-        if (frameScore >= kSceneStableRatioThreshold) {
+        if (frameScore >= kSceneStableRatioThreshold &&
+            motionCenterY <= kEntryUpperZoneMaxY) {
           approachCandidate = true;
           approachTrackingActive = true;
-          approachStartScore = score;
-          approachMinScore = score;
-          approachMaxScore = score;
           approachActiveFrames = 1;
-          farTargetSeen = score <= kApproachFarScoreMax;
+          entryStartY = motionCenterY;
+          entryMaxY = motionCenterY;
+          lastMotionCenterY = motionCenterY;
           nearTargetSeen = false;
           approachStartedAt = now;
           approachMissingFrames = 0;
           Serial.printf(
-              "[APPROACH] moving target acquired, size=%u.%02u%% far=%s\n",
-              score / 100, score % 100, farTargetSeen ? "yes" : "no");
+              "[ENTRY] target acquired in upper zone, y=%u score=%u.%02u%%\n",
+              motionCenterY, score / 100, score % 100);
         }
       } else {
         approachMissingFrames = 0;
         if (approachActiveFrames < UINT8_MAX) {
           ++approachActiveFrames;
         }
-        approachMinScore = std::min(approachMinScore, score);
-        approachMaxScore = std::max(approachMaxScore, score);
-        if (score <= kApproachFarScoreMax) {
-          farTargetSeen = true;
-        }
-        const bool grewEnough =
-            approachMaxScore >= approachMinScore + kApproachRequiredGrowth;
-        if (!nearTargetSeen && farTargetSeen && grewEnough &&
-            approachActiveFrames >= kApproachMinActiveFrames &&
-            approachMaxScore >= kApproachNearScoreMin) {
+        lastMotionCenterY = motionCenterY;
+        entryMaxY = std::max(entryMaxY, motionCenterY);
+        const bool travelledDownward =
+            entryMaxY >= entryStartY + kEntryRequiredTravelY;
+        if (!nearTargetSeen && travelledDownward &&
+            approachActiveFrames >= kEntryMinActiveFrames &&
+            motionCenterY >= kEntryLowerZoneMinY) {
           nearTargetSeen = true;
           approachNearConfirmed = true;
-          exitReferenceScore = approachMaxScore;
           Serial.printf(
-              "[APPROACH] near target confirmed, size=%u.%02u%%->%u.%02u%%; waiting for disappearance\n",
-              approachMinScore / 100, approachMinScore % 100,
-              approachMaxScore / 100, approachMaxScore % 100);
-        }
-        if (nearTargetSeen) {
-          if (score > exitReferenceScore) {
-            exitReferenceScore = score;
-            partialExitFrames = 0;
-          } else {
-            const bool absoluteDrop =
-                exitReferenceScore >= score + kApproachPartialExitDrop;
-            const bool relativeDrop =
-                static_cast<uint32_t>(score) * 100UL <=
-                static_cast<uint32_t>(exitReferenceScore) *
-                    kApproachRemainingPercent;
-            const bool anotherTargetRemains =
-                score >= kApproachRemainingTargetMin;
-            if (absoluteDrop && relativeDrop && anotherTargetRemains) {
-              if (partialExitFrames < kApproachPartialExitFrames) {
-                ++partialExitFrames;
-              }
-              if (partialExitFrames >= kApproachPartialExitFrames) {
-                const bool cooldownComplete =
-                    lastCountAt == 0 ||
-                    now - lastCountAt >= kApproachExitCooldownMs;
-                if (cooldownComplete) {
-                  pendingFlowEvent = true;
-                  if (appendFlowEvent()) {
-                    pendingFlowEvent = false;
-                    lastCountAt = now;
-                  } else {
-                    Serial.println("[FLOW] partial-exit event queued for retry");
-                  }
-                  Serial.printf(
-                      "[APPROACH] partial disappearance counted, coverage=%u.%02u%%->%u.%02u%%\n",
-                      exitReferenceScore / 100, exitReferenceScore % 100,
-                      score / 100, score % 100);
-                }
-                exitReferenceScore = score;
-                partialExitFrames = 0;
-              }
-            } else {
-              partialExitFrames = 0;
-            }
-          }
+              "[ENTRY] lower zone crossed, y=%u->%u; waiting for bottom exit\n",
+              entryStartY, entryMaxY);
         }
       }
     } else if (approachCandidate) {
-      if (++approachMissingFrames >= kApproachMissingFramesToConfirmExit) {
-        if (nearTargetSeen) {
+      if (++approachMissingFrames >= kEntryMissingFramesToConfirmExit) {
+        const bool exitedAtBottom =
+            nearTargetSeen && entryMaxY >= kEntryBottomExitMinY &&
+            lastMotionCenterY >= kEntryBottomExitMinY;
+        if (exitedAtBottom) {
           const bool cooldownComplete =
               lastCountAt == 0 ||
-              now - lastCountAt >= kApproachExitCooldownMs;
+              now - lastCountAt >= kEntryExitCooldownMs;
           if (cooldownComplete) {
             pendingFlowEvent = true;
             if (appendFlowEvent()) {
@@ -1707,19 +1655,17 @@ void motionTask(void *) {
               Serial.println("[FLOW] event queued for retry");
             }
             Serial.printf(
-                "[APPROACH] near-side disappearance counted, size=%u.%02u%%->%u.%02u%%\n",
-                approachStartScore / 100, approachStartScore % 100,
-                approachMaxScore / 100, approachMaxScore % 100);
+                "[ENTRY] top-to-bottom passage counted, y=%u->%u\n",
+                entryStartY, entryMaxY);
           } else {
-            Serial.println(
-                "[APPROACH] near-side disappearance ignored during cooldown");
+            Serial.println("[ENTRY] bottom exit ignored during cooldown");
           }
           armedMotionActive = true;
         } else {
           Serial.printf(
-              "[APPROACH] disappearance ignored: target did not grow from far to near, min=%u.%02u%% max=%u.%02u%%\n",
-              approachMinScore / 100, approachMinScore % 100,
-              approachMaxScore / 100, approachMaxScore % 100);
+              "[ENTRY] disappearance ignored: incomplete or reverse passage, crossed=%s startY=%u maxY=%u lastY=%u\n",
+              nearTargetSeen ? "yes" : "no", entryStartY, entryMaxY,
+              lastMotionCenterY);
         }
         resetApproachTracking();
       }
